@@ -1,8 +1,12 @@
 # Deploy
 
-## Dependency Analysis
+## Overview
 
-The DependencyAnalyzer provides a method for analyzing dependencies between Gno packages. It calculates coupling metrics to help identify highly coupled or unstable packages, which is essential for maintaining a healthy codebase. The analyzer works by:
+Deploy (working title) is a tool used for deploying packages implemented in gno. This tool functions by sorting packages according to their dependencies and generating deployment scripts.
+
+### Dependency Analysis
+
+The Dependency Analyzer provides a method for analyzing dependencies between Gno packages. The analyzer works by:
 
 1. Parsing Go-like grammar source files to extract package declarations and import statements
 2. Building a dependency graph between packages
@@ -15,7 +19,7 @@ $$I = C_e/(C_a+C_e)$$
 
 Once analyzed, you can generate deployment orders based on topological sorting, ensuring dependencies are deployed before dependent packages. The analyzer gracefully handles cyclic dependencies when they occur. Results can be exported in both JSON and text formats, with options for detailed metrics that include coupling scores and all import relationships.
 
-I'll translate your text from Korean to English.
+For dependency analysis, the code is parsed using tree-sitter. It is designed to recognize both single and block import statements.
 
 ## Why Do We Sort?
 
@@ -26,3 +30,4 @@ Therefore, a sorting function is necessary to prevent such situations in advance
 ## TODO
 
 - codegen with maketx query format
+- CLI commands
