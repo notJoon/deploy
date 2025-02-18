@@ -7,9 +7,8 @@ The DependencyAnalyzer provides a method for analyzing dependencies between Gno 
 1. Parsing Go-like grammar source files to extract package declarations and import statements
 2. Building a dependency graph between packages
 3. Calculating key metrics:
-$$
-I = C_e/(C_a+C_e)
-$$
+
+$$I = C_e/(C_a+C_e)$$
    - **Afferent coupling ($C_a$)**: The number of packages that depend on a package (incoming dependencies)
    - **Efferent coupling ($C_e$)**: The number of packages a package depends on (outgoing dependencies)
    - **Instability ($I$)**: Calculated as $Ce/(Ca+Ce)$, ranging from $0$ (stable) to $1$ (unstable)
