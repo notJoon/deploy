@@ -15,13 +15,13 @@ $$I = C_e/(C_a+C_e)$$
 
 Once analyzed, you can generate deployment orders based on topological sorting, ensuring dependencies are deployed before dependent packages. The analyzer gracefully handles cyclic dependencies when they occur. Results can be exported in both JSON and text formats, with options for detailed metrics that include coupling scores and all import relationships.
 
-## Topological Sorting for Gno Package Deployment
+I'll translate your text from Korean to English.
 
-One of the primary motivations for implementing topological sorting in our dependency analysis tool is to address a critical issue in Gno package deployment. When deploying packages in an incorrect order (i.e., when prerequisite packages aren't deployed first), the system doesn't raise errors during the ABCI query (maketx) phase.
+## Why Do We Sort?
 
-This silent failure can lead to complications that are difficult to debug. Our analyzer uses topological sorting to generate a proper deployment sequence, ensuring that all dependencies are satisfied before dependent packages are deployed.
+Currently, this tool has the functionality to perform topological sorting based on analyzed dependencies. When deploying a single package, the order may not be an issue, but when deploying multiple packages, failure to consider dependencies can result in recognition problems after deployment is completed. For example, there may be situations where addresses declared as constants in certain contracts are not recognized.
 
-The algorithm identifies packages with no dependencies first, then progressively works through the dependency chain, handling cyclic dependencies when they occur. This approach significantly reduces deployment failures and simplifies the process of managing complex package hierarchies in environments.
+Therefore, a sorting function is necessary to prevent such situations in advance. The sorted data is used later when generating code. This way, users don't need to worry about dependencies between packages and can simply focus on deployment.
 
 ## TODO
 
