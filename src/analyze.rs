@@ -1,10 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
-use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Parser, Query, QueryCursor, StreamingIteratorMut};
 use tree_sitter_go;
-
-use walkdir::WalkDir;
 
 /// Represents a Go package with its dependencies and coupling metrics.
 ///
@@ -13,10 +11,10 @@ use walkdir::WalkDir;
 ///  - Ca = Afferent coupling (incoming dependencies)
 ///  - Ce = Efferent coupling (outgoing dependencies)
 #[derive(Debug, PartialEq)]
-struct Package {
+pub(self) struct Package {
     /// Name of the package
     name: String,
-    // Set of packages that this package imports
+    /// Set of packages that this package imports
     imports: HashSet<String>,
     /// Instability score (0.0 to 1.0, higher means more unstable)
     coupling_score: f64,
@@ -74,16 +72,36 @@ impl DependencyAnalyzer {
     /// * `Err` with a description if any error occurs during analysis
     pub fn analyze_file(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let source_code = std::fs::read_to_string(path)?;
+        let (package_name, imports) = self.extract_package_and_imports(&source_code)?;
 
+        if !package_name.is_empty() {
+            self.packages.insert(
+                package_name.clone(),
+                Package {
+                    name: package_name,
+                    imports,
+                    coupling_score: 0.0,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Extracts package name and imports from Go source code
+    fn extract_package_and_imports(
+        &self,
+        source_code: &str,
+    ) -> Result<(String, HashSet<String>), AnalysisError> {
         let mut parser = Parser::new();
         let language = tree_sitter_go::LANGUAGE;
         parser.set_language(&language.into())?;
 
         let tree = parser
-            .parse(&source_code, None)
-            .ok_or("Failed to parse source code")?;
+            .parse(source_code, None)
+            .ok_or_else(|| AnalysisError::ParseError("Failed to parse source code".to_string()))?;
 
-        // handle group and single import
+        // Query for package clause and imports
         let query = Query::new(
             &language.into(),
             r#"
@@ -109,7 +127,7 @@ impl DependencyAnalyzer {
         let mut current_package = String::new();
         let mut imports = HashSet::new();
 
-        while let Some(matched) = matches.next() {
+        while let Some(matched) = matches.next_mut() {
             for capture in matched.captures {
                 let capture_text = capture
                     .node
@@ -128,18 +146,7 @@ impl DependencyAnalyzer {
             }
         }
 
-        if !current_package.is_empty() {
-            self.packages.insert(
-                current_package.clone(),
-                Package {
-                    name: current_package,
-                    imports,
-                    coupling_score: 0.0,
-                },
-            );
-        }
-
-        Ok(())
+        Ok((current_package, imports))
     }
 
     /// Calculates coupling scores for all analyzed packages.
@@ -152,21 +159,12 @@ impl DependencyAnalyzer {
     /// A higher score (closer to 1.0) indicates that the package is more unstable
     /// and dependent on other packages.
     pub fn calculate_coupling_scores(&mut self) {
-        let package_imports: HashMap<String, f64> = self
-            .packages
-            .keys()
-            .map(|name| {
-                let afferent = self
-                    .packages
-                    .values()
-                    .filter(|p| p.imports.contains(name))
-                    .count() as f64;
-                (name.clone(), afferent)
-            })
-            .collect();
+        // Calculate afferent coupling (incoming dependencies)
+        let package_afferent_coupling = self.calculate_afferent_coupling();
 
+        // Update coupling scores for each package
         for package in self.packages.values_mut() {
-            let afferent = *package_imports.get(&package.name).unwrap_or(&0.0);
+            let afferent = *package_afferent_coupling.get(&package.name).unwrap_or(&0.0);
             let efferent = package.imports.len() as f64;
 
             if (afferent + efferent) > 0.0 {
@@ -179,6 +177,21 @@ impl DependencyAnalyzer {
                 );
             }
         }
+    }
+
+    /// Calculate afferent coupling for all packages
+    fn calculate_afferent_coupling(&self) -> HashMap<String, f64> {
+        self.packages
+            .keys()
+            .map(|name| {
+                let afferent = self
+                    .packages
+                    .values()
+                    .filter(|p| p.imports.contains(name))
+                    .count() as f64;
+                (name.clone(), afferent)
+            })
+            .collect()
     }
 
     /// Returns a vector of package references sorted by coupling score in descending order.
@@ -212,7 +225,46 @@ impl DependencyAnalyzer {
     /// If the dependency graph contains cycles, this function will identify packages
     /// involved in cyclic dependencies and will make a best effort to generate a valid order.
     pub fn generate_deployment_order(&self) -> Vec<&Package> {
-        // Create a dependency graph where A imports B means B -> A (B must be deployed before A)
+        // Build dependency graph
+        let (dependency_count, dependents) = self.build_dependency_graph();
+
+        // Start with packages that have no dependencies
+        let mut queue: VecDeque<&str> = dependency_count
+            .iter()
+            .filter(|(_, count)| **count == 0)
+            .map(|(&name, _)| name)
+            .collect();
+
+        let mut result: Vec<&Package> = Vec::new();
+        let mut remaining_dependencies = dependency_count.clone();
+
+        // Process packages with no dependencies
+        while let Some(package_name) = queue.pop_front() {
+            if let Some(package) = self.packages.get(package_name) {
+                result.push(package);
+            }
+
+            // For all packages that depend on this one
+            if let Some(deps) = dependents.get(package_name) {
+                for &dependent in deps {
+                    if let Some(count) = remaining_dependencies.get_mut(dependent) {
+                        *count -= 1;
+                        if *count == 0 {
+                            queue.push_back(dependent);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Handle cyclic dependencies if any
+        self.handle_cyclic_dependencies(&mut result, &remaining_dependencies);
+
+        result
+    }
+
+    /// Builds the dependency graph for topological sorting
+    fn build_dependency_graph(&self) -> (HashMap<&str, usize>, HashMap<&str, Vec<&str>>) {
         let mut dependency_count: HashMap<&str, usize> = HashMap::new();
         let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
 
@@ -235,56 +287,37 @@ impl DependencyAnalyzer {
                     // The imported package has this package as a dependent
                     dependents
                         .entry(dependency)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(dependent_name);
                 }
             }
         }
 
-        // Start with packages that have no dependencies
-        let mut queue: VecDeque<&str> = dependency_count
-            .iter()
-            .filter(|(_, count)| **count == 0)
-            .map(|(&name, _)| name)
-            .collect();
+        (dependency_count, dependents)
+    }
 
-        let mut result = Vec::new();
-
-        while let Some(package_name) = queue.pop_front() {
-            if let Some(package) = self.packages.get(package_name) {
-                result.push(package);
-            }
-
-            // For all packages that depend on this one
-            if let Some(deps) = dependents.get(package_name) {
-                for &dependent in deps {
-                    if let Some(count) = dependency_count.get_mut(dependent) {
-                        *count -= 1;
-                        if *count == 0 {
-                            queue.push_back(dependent);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Check for cycles
+    /// Handles adding packages involved in cyclic dependencies to the result
+    fn handle_cyclic_dependencies<'a>(
+        &'a self,
+        result: &mut Vec<&'a Package>,
+        remaining_dependencies: &HashMap<&str, usize>,
+    ) {
         if result.len() < self.packages.len() {
             eprintln!(
                 "Warning: Cyclic dependencies detected. Deployment order may not be optimal."
             );
 
             // Add remaining packages (those involved in cycles)
-            for (name, &count) in &dependency_count {
+            for (name, &count) in remaining_dependencies {
                 if count > 0 {
                     if let Some(package) = self.packages.get(*name) {
-                        result.push(package);
+                        if !result.contains(&package) {
+                            result.push(package);
+                        }
                     }
                 }
             }
         }
-
-        result
     }
 
     /// Exports analysis results in the specified format
@@ -294,7 +327,18 @@ impl DependencyAnalyzer {
         detailed: bool,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let packages = self.get_sorted_packages();
-        let results: Vec<PackageAnalysis> = packages
+        let results = self.prepare_analysis_results(&packages);
+
+        match format {
+            "json" => Ok(serde_json::to_string_pretty(&results)?),
+            "text" => Ok(self.format_text_output(&results, detailed)),
+            _ => Err(AnalysisError::UnsupportedFormat(format.to_string()).into()),
+        }
+    }
+
+    /// Prepares analysis results from packages
+    fn prepare_analysis_results(&self, packages: &[&Package]) -> Vec<PackageAnalysis> {
+        packages
             .iter()
             .map(|p| {
                 let afferent = self
@@ -316,36 +360,88 @@ impl DependencyAnalyzer {
                     },
                 }
             })
-            .collect();
+            .collect()
+    }
 
-        match format {
-            "json" => Ok(serde_json::to_string_pretty(&results)?),
-            "text" => {
-                let mut output = String::new();
-                for result in results {
-                    output.push_str(&format!("Package: {}\n", result.name));
-                    output.push_str(&format!("Coupling Score: {:.2}\n", result.coupling_score));
+    /// Formats results as text output
+    fn format_text_output(&self, results: &[PackageAnalysis], detailed: bool) -> String {
+        let mut output = String::new();
+        for result in results {
+            output.push_str(&format!("Package: {}\n", result.name));
+            output.push_str(&format!("Coupling Score: {:.2}\n", result.coupling_score));
 
-                    if detailed {
-                        output.push_str(&format!(
-                            "Afferent Coupling: {}\n",
-                            result.metrics.afferent_coupling
-                        ));
-                        output.push_str(&format!(
-                            "Efferent Coupling: {}\n",
-                            result.metrics.efferent_coupling
-                        ));
-                        output.push_str("Imports:\n");
-                        for import in result.imports {
-                            output.push_str(&format!("  - {}\n", import));
-                        }
-                    }
-                    output.push_str("\n");
+            if detailed {
+                output.push_str(&format!(
+                    "Afferent Coupling: {}\n",
+                    result.metrics.afferent_coupling
+                ));
+                output.push_str(&format!(
+                    "Efferent Coupling: {}\n",
+                    result.metrics.efferent_coupling
+                ));
+                output.push_str("Imports:\n");
+                for import in &result.imports {
+                    output.push_str(&format!("  - {}\n", import));
                 }
-                Ok(output)
             }
-            _ => Err("Unsupported output format".into()),
+            output.push('\n');
         }
+        output
+    }
+}
+
+#[derive(Debug)]
+enum AnalysisError {
+    IoError(std::io::Error),
+    ParseError(String),
+    TreeSitterError(String),
+    SerializationError(String),
+    UnsupportedFormat(String),
+}
+
+impl std::fmt::Display for AnalysisError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AnalysisError::IoError(err) => write!(f, "I/O error: {}", err),
+            AnalysisError::ParseError(msg) => write!(f, "Parse error: {}", msg),
+            AnalysisError::TreeSitterError(msg) => write!(f, "Tree-sitter error: {}", msg),
+            AnalysisError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
+            AnalysisError::UnsupportedFormat(format) => {
+                write!(f, "Unsupported output format: {}", format)
+            }
+        }
+    }
+}
+
+impl std::error::Error for AnalysisError {}
+
+impl From<std::io::Error> for AnalysisError {
+    fn from(err: std::io::Error) -> Self {
+        AnalysisError::IoError(err)
+    }
+}
+
+impl From<tree_sitter::LanguageError> for AnalysisError {
+    fn from(err: tree_sitter::LanguageError) -> Self {
+        AnalysisError::TreeSitterError(err.to_string())
+    }
+}
+
+impl From<tree_sitter::QueryError> for AnalysisError {
+    fn from(err: tree_sitter::QueryError) -> Self {
+        AnalysisError::TreeSitterError(err.to_string())
+    }
+}
+
+impl From<std::str::Utf8Error> for AnalysisError {
+    fn from(err: std::str::Utf8Error) -> Self {
+        AnalysisError::ParseError(err.to_string())
+    }
+}
+
+impl From<serde_json::Error> for AnalysisError {
+    fn from(err: serde_json::Error) -> Self {
+        AnalysisError::SerializationError(err.to_string())
     }
 }
 

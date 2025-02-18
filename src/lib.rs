@@ -4,10 +4,10 @@ use std::path::PathBuf;
 pub mod analyze;
 
 #[derive(Parser)]
-#[command(name = "go-deps")]
-#[command(author = "Your Name <your.email@example.com>")]
+#[command(name = "deploy")]
+#[command(author = "")]
 #[command(version = "1.0")]
-#[command(about = "Analyzes Go package dependencies and generates ordered code", long_about = None)]
+#[command(about = "Analyzes Gno package dependencies and generates ordered code", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for entry in walkdir::WalkDir::new(path)
                 .into_iter()
                 .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().map_or(false, |ext| ext == "go"))
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "go"))
             {
                 analyzer.analyze_file(entry.path())?;
             }
